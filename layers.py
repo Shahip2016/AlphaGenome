@@ -21,3 +21,17 @@ class ConvBlock(nn.Module):
 
     def forward(self, x):
         return self.activation(self.bn(self.conv(x)))
+
+class ResidualBlock(nn.Module):
+    def __init__(self, channels, kernel_size, dilation=1, dropout=0.1):
+        super().__init__()
+        self.block = nn.Sequential(
+            ConvBlock(channels, channels, kernel_size, dilation=dilation, activation='gelu'),
+            nn.Dropout(dropout),
+            nn.Conv1d(channels, channels, kernel_size, dilation=dilation, padding='same', bias=False),
+            nn.BatchNorm1d(channels)
+        )
+        self.activation = nn.GELU()
+
+    def forward(self, x):
+        return self.activation(x + self.block(x))
