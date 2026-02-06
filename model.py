@@ -23,6 +23,12 @@ class AlphaGenome(nn.Module):
             )
             self.encoder_stages.append(stage)
             current_channels = out_channels
+            
+        # Transformer Bottleneck
+        self.transformer_blocks = nn.ModuleList([
+            TransformerBlock(current_channels, config.transformer_heads, dropout=config.dropout)
+            for _ in range(config.transformer_depth)
+        ])
 
     def forward(self, x):
         # x: [Batch, 4, Length]
@@ -33,5 +39,9 @@ class AlphaGenome(nn.Module):
         for stage in self.encoder_stages:
             x = stage(x)
             skips.append(x)
-        
+            
+        # Transformer
+        for block in self.transformer_blocks:
+            x = block(x)
+            
         return x
