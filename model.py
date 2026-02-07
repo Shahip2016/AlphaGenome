@@ -5,18 +5,31 @@ from config import AlphaGenomeConfig
 from layers import ConvBlock, ResidualBlock, TransformerBlock
 
 class AlphaGenome(nn.Module):
+    """
+    AlphaGenome: A deep learning model for genomic sequence analysis.
+    Combines convolutional layers for local pattern extraction with 
+    Transformers for long-range dependency modeling.
+    """
     def __init__(self, config: AlphaGenomeConfig):
         super().__init__()
         self.config = config
         
-        # Stem
-        self.stem = ConvBlock(config.num_channels, config.stem_channels, kernel_size=15)
+        # Stem: Initial local context extraction
+        self.stem = ConvBlock(
+            config.num_channels, 
+            config.stem_channels, 
+            kernel_size=config.stem_kernel_size
+        )
         
-        # Encoder (Downsampling)
+        # Encoder: Hierarchical feature extraction with downsampling
         self.encoder_stages = nn.ModuleList()
         current_channels = config.stem_channels
         
-        for out_channels, kernel_size, stride in zip(config.encoder_channels, config.encoder_kernels, config.pool_kernels):
+        for out_channels, kernel_size, stride in zip(
+            config.encoder_channels, 
+            config.encoder_kernels, 
+            config.pool_kernels
+        ):
             stage = nn.Sequential(
                 ConvBlock(current_channels, out_channels, kernel_size=kernel_size, stride=stride),
                 ResidualBlock(out_channels, kernel_size=kernel_size)
@@ -24,15 +37,18 @@ class AlphaGenome(nn.Module):
             self.encoder_stages.append(stage)
             current_channels = out_channels
             
-        # Transformer Bottleneck
+        # Transformer Bottleneck: Modeling long-range interactions
         self.transformer_blocks = nn.ModuleList([
-            TransformerBlock(current_channels, config.transformer_heads, dropout=config.dropout)
+            TransformerBlock(
+                current_channels, 
+                config.transformer_heads, 
+                window_size=config.transformer_window_size,
+                dropout=config.dropout
+            )
             for _ in range(config.transformer_depth)
         ])
         
-        # Decoder (Upsampling)
-        # Note: Decoder architecture is typically symmetric or lighter. 
-        # Here we implement a simple upsampling path.
+        # Decoder: Upsampling to target resolution
         self.decoder_stages = nn.ModuleList()
         decoder_in_channels = current_channels
         
@@ -45,46 +61,60 @@ class AlphaGenome(nn.Module):
             self.decoder_stages.append(stage)
             decoder_in_channels = out_channels
             
-        # Heads
-        # 1D Head (Track prediction)
-        self.head_1d = nn.Sequential(
-            ConvBlock(decoder_in_channels, decoder_in_channels, kernel_size=1),
-            nn.Conv1d(decoder_in_channels, config.num_tracks_human, kernel_size=1)
-        )
-        
-        # 2D Head (Contact maps) - simplified projection
-        self.head_2d_proj = nn.Linear(decoder_in_channels, 64) 
-        self.head_2d_conv = nn.Conv2d(64, 1, kernel_size=1)
+        # Task-Specific Heads
+        self.head_1d = self._build_1d_head(decoder_in_channels, config.num_tracks_human)
+        self.head_2d = self._build_2d_head(decoder_in_channels, config.head_2d_dim)
 
-    def forward(self, x):
-        # x: [Batch, 4, Length]
+    def _build_1d_head(self, in_channels: int, out_channels: int) -> nn.Module:
+        """Builds the 1D track prediction head."""
+        return nn.Sequential(
+            ConvBlock(in_channels, in_channels, kernel_size=1),
+            nn.Conv1d(in_channels, out_channels, kernel_size=1)
+        )
+
+    def _build_2d_head(self, in_channels: int, proj_dim: int) -> nn.Module:
+        """Builds the 2D contact map prediction head."""
+        return nn.ModuleDict({
+            'proj': nn.Linear(in_channels, proj_dim),
+            'conv': nn.Conv2d(1, 1, kernel_size=1) # Simplified: operates on pairwise interaction
+        })
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass of AlphaGenome.
+        Args:
+            x: Genomic sequence tensor [Batch, 4, Length]
+        Returns:
+            out_1d: Track predictions [Batch, num_tracks, Length']
+            out_2d: Contact maps [Batch, 1, Length'', Length'']
+        """
+        # Feature Extraction
         x = self.stem(x)
         
-        # Encoder
-        skips = []
         for stage in self.encoder_stages:
             x = stage(x)
-            skips.append(x)
             
-        # Transformer
         for block in self.transformer_blocks:
             x = block(x)
             
-        # Decoder
         for stage in self.decoder_stages:
             x = stage(x)
             
-        # 1D Output
+        # 1D Prediction
         out_1d = self.head_1d(x)
         
-        # 2D Output (Contact Map)
-        x_perm = x.permute(0, 2, 1) # [B, L', C]
-        x_proj = self.head_2d_proj(x_perm) # [B, L', 64]
+        # 2D Prediction (Symmetric interaction map)
+        # [B, C, L] -> [B, L, C]
+        x_perm = x.permute(0, 2, 1)
+        x_proj = self.head_2d['proj'](x_perm) # [B, L, proj_dim]
         
-        # Create pairwise representation (simplified)
-        out_2d_feature = x_proj.unsqueeze(2) + x_proj.unsqueeze(1) # [B, L, L, 64]
-        out_2d_feature = out_2d_feature.permute(0, 3, 1, 2) # [B, 64, L, L]
+        # Pairwise interaction (e.g., outer sum for distance proxy)
+        # [B, L, 1, proj_dim] + [B, 1, L, proj_dim] -> [B, L, L, proj_dim]
+        # Then reduce to [B, 1, L, L] for the final convolution
+        interaction = (x_proj.unsqueeze(2) + x_proj.unsqueeze(1)).mean(dim=-1, keepdim=True)
+        interaction = interaction.permute(0, 3, 1, 2) # [B, 1, L, L]
         
-        out_2d = self.head_2d_conv(out_2d_feature) # [B, 1, L, L]
+        out_2d = self.head_2d['conv'](interaction)
         
         return out_1d, out_2d
+
