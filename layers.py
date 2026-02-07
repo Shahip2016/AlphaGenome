@@ -49,7 +49,8 @@ class ResidualBlock(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, dim, num_heads, window_size=512, dropout=0.1):
+    """Transformer block with multi-head attention and MLP."""
+    def __init__(self, dim: int, num_heads: int, window_size: int = 512, dropout: float = 0.1):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
@@ -57,7 +58,8 @@ class TransformerBlock(nn.Module):
         
         self.norm1 = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(dim, num_heads, dropout=dropout, batch_first=True)
-        self.dropout = nn.Dropout(dropout)
+        self.dropout1 = nn.Dropout(dropout)
+        
         self.norm2 = nn.LayerNorm(dim)
         self.mlp = nn.Sequential(
             nn.Linear(dim, dim * 4),
@@ -67,21 +69,27 @@ class TransformerBlock(nn.Module):
             nn.Dropout(dropout)
         )
 
-    def forward(self, x):
-        # x: [Batch, Channels, Length] -> [Batch, Length, Channels] for Attention
-        x_perm = x.permute(0, 2, 1)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for TransformerBlock.
+        Args:
+            x: Input tensor of shape [Batch, Channels, Length]
+        Returns:
+            Output tensor of shape [Batch, Channels, Length]
+        """
+        # [B, C, L] -> [B, L, C]
+        x = x.permute(0, 2, 1)
         
-        # Simple windowed attention approximation or full attention if length permits (simplified here)
-        # In a real 1Mb scenario, we would use windowed attention or efficient transformers.
-        # Here we assume the input to transformer is already downsampled enough or we operate on chunks.
-        
-        # Pre-norm architecture
-        x_norm = self.norm1(x_perm)
+        # Attention with Pre-norm
+        x_norm = self.norm1(x)
         attn_out, _ = self.attn(x_norm, x_norm, x_norm)
-        x_perm = x_perm + self.dropout(attn_out)
+        x = x + self.dropout1(attn_out)
         
-        x_norm = self.norm2(x_perm)
+        # MLP with Pre-norm
+        x_norm = self.norm2(x)
         mlp_out = self.mlp(x_norm)
-        x_perm = x_perm + mlp_out
+        x = x + mlp_out
         
-        return x_perm.permute(0, 2, 1) # Back to [Batch, Channels, Length]
+        # [B, L, C] -> [B, C, L]
+        return x.permute(0, 2, 1)
+
